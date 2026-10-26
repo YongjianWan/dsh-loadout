@@ -9,7 +9,7 @@
     "./client": "./client.js",
     "./package.json": "./package.json"
   },
-  "files": ["index.js", "client.js", "cordis.patch.yml"],
+  "files": ["index.js", "client.js", "cordis.patch.yml", "README.md", "docs/"],
   "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "tools", "context", "loadout"],
   "license": "MIT",
   "dsh": {

@@ -1,6 +1,9 @@
 node_modules/
 *.log
-toolctl-stats.json
-toolctl-config.json
-toolctl-debug.log
+loadout-stats.json
+loadout-config.json
+loadout-debug.log
 .DS_Store
+
+# 设计清单只留本地，不上远程（含本机数据与内部取舍，Aiden 2026-10-27 定）
+docs/design.md
