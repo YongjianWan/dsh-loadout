@@ -1,0 +1,6 @@
+node_modules/
+*.log
+toolctl-stats.json
+toolctl-config.json
+toolctl-debug.log
+.DS_Store

@@ -1,0 +1,24 @@
+# awesome-dsh-plugin 提交条目
+#
+# 把下面内容存成 data/plugins/<owner>__<repo>.yml 提 PR。
+# 硬性要求（contributing.md 原文）：
+#   1. 仓库 package.json 必须声明 dsh.bundle（只有 dsh.client 会被拒）
+#   2. 仓库根必须有 cordis.patch.yml
+#   3. 仓库创建满 1 天（CI 自动查）
+#   4. 仓库加 dsh-plugin topic
+#   5. description 必须属实：写了数字就得能数出来
+#   6. 一个 PR 最多 3 条
+#
+# 本条目按实际实现填写，核对过的数字：
+#   - 13 个组（browser/desktop/office/mail/remote/team/mem-admin/mcp-admin/search-ext/ops-admin/sched/goal/extras）
+#   - 3 个元工具（toolctl / tools_search / tools_call）
+#   - 一次实测会话：162 个工具注册，152 个进组，10 个常驻核心
+
+url: https://github.com/OWNER/dsh-loadout   # 必须与仓库完全一致
+name: OWNER/dsh-loadout                      # 列表中显示的链接文字
+category: tools                              # 或 dev；按需激活工具属于 tools
+description:
+  en: 'On-demand tool loadout for DSH: keeps a small always-visible core, hides the rest behind per-group activation, and offers search plus a proxy call for long-tail tools.'
+  zh: 'DSH 的按需工具装配：常驻一个小核心集，其余工具按组默认隐藏、需要时一句话激活，长尾工具用搜索加代理调用。'
+# icon: https://raw.githubusercontent.com/OWNER/dsh-loadout/main/assets/icon-180.png
+# tarball: https://github.com/OWNER/dsh-loadout/releases/latest/download/dsh-loadout.tgz

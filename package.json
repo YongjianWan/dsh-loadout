@@ -1,0 +1,22 @@
+{
+  "name": "dsh-loadout",
+  "version": "1.0.0",
+  "description": "On-demand tool loadout for DeepSeek Harness: keep a small always-visible core, hide the rest behind per-group activation, and offer search plus a proxy call for long-tail tools.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml"],
+  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "tools", "context", "loadout"],
+  "license": "MIT",
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-client-ui-plugin-manager"]
+    }
+  }
+}
