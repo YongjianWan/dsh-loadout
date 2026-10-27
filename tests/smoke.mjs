@@ -602,4 +602,75 @@ const fActive = await fAct({ action: 'click', uid: 'u1' })
 check('组激活后门面仍可用并提示有完整工具', () => assert.ok(fActive.includes('提示'), fActive))
 await act({ action: 'deactivate', group: 'chrome-devtools' })
 
+console.log('18. deny 未变时不重复 restrict（2026-10-27 日志里 852 行 applyMask 大半是重复）')
+await act({ action: 'activate', group: 'search-ext' })
+await act({ action: 'deactivate', group: 'search-ext' })
+restrictCalls.length = 0
+await act({ action: 'deactivate', group: 'search-ext' }) // 已经隐藏，直接返回
+const nAfterNoop = restrictCalls.length
+check('已隐藏的组再 deactivate 不触发 restrict', () => assert.equal(nAfterNoop, 0, `实际 ${nAfterNoop} 次`))
+// 状态真变（deny 名单变了）时必须 restrict——否则掩码永远停在旧集合上
+await act({ action: 'activate', group: 'tieba' })
+restrictCalls.length = 0
+await act({ action: 'activate', group: 'bili' })
+check('deny 名单变化时照常 restrict 一次', () => assert.equal(restrictCalls.length, 1, `实际 ${restrictCalls.length} 次`))
+await act({ action: 'deactivate', group: 'tieba' })
+await act({ action: 'deactivate', group: 'bili' })
+
+console.log('19. 死 agent 清理（pruneAgents）')
+const mkCtx = () => ({ tools: { restrict(f) { restrictCalls.push(f); return () => {} } }, effect: (fn) => { fn(); return () => {} } })
+const snapAgents = async () => {
+  const r = fakeRes()
+  await stateRoute.handler(panelReq(), r)
+  return JSON.parse(r.body).agents
+}
+// 造两个 agent：a1 和 ghost 都在本插件表里
+ctx.get = (n) => (n === 'agents' ? { list: () => [{ id: 'a1' }, { id: 'ghost' }], roots: () => [{ id: 'a1' }, { id: 'ghost' }] } : undefined)
+handlers['agent/created']({ agent: { id: 'a1', ctx: mkCtx() }, source: 'startup' })
+handlers['agent/created']({ agent: { id: 'ghost', ctx: mkCtx() }, source: 'startup' })
+const beforePrune = await snapAgents()
+check('清理前 ghost 在表里', () => assert.ok(beforePrune.some((a) => a.id === 'ghost'), JSON.stringify(beforePrune.map((a) => a.id))))
+
+// 宿主注册表里只剩 a1 → tools/change 应把 ghost 清掉
+ctx.get = (n) => (n === 'agents' ? { list: () => [{ id: 'a1' }], roots: () => [{ id: 'a1' }] } : undefined)
+handlers['tools/change']()
+const afterPrune = await snapAgents()
+check('list() 回的子集之外被清掉，活着的保留', () => {
+  assert.ok(afterPrune.some((a) => a.id === 'a1'), '活着的 a1 不该被删')
+  assert.ok(!afterPrune.some((a) => a.id === 'ghost'), 'ghost 应被清掉：' + JSON.stringify(afterPrune.map((a) => a.id)))
+})
+
+// 服务不可用 → 一个都不删（删错活 agent 会让 restrict 永远没人撤）
+ctx.get = () => undefined
+handlers['tools/change']()
+const afterNoSvc = await snapAgents()
+check('agents 服务不可用时不删任何 agent', () => assert.ok(afterNoSvc.some((a) => a.id === 'a1'), JSON.stringify(afterNoSvc.map((a) => a.id))))
+
+// list() 返回空数组 → 当"还没就绪"，不当"全死了"
+ctx.get = (n) => (n === 'agents' ? { list: () => [], roots: () => [] } : undefined)
+handlers['tools/change']()
+const afterEmpty = await snapAgents()
+check('list() 空数组时不当作全死，保留记录', () => assert.ok(afterEmpty.some((a) => a.id === 'a1'), JSON.stringify(afterEmpty.map((a) => a.id))))
+
+console.log('20. 调试日志轮转')
+{
+  const { statSync, existsSync: ex, appendFileSync: app } = await import('node:fs')
+  const { join } = await import('node:path')
+  const logPath = join(home, 'loadout-debug.log')
+  const bakPath = logPath + '.1'
+  // 灌到超过 1 MB
+  app(logPath, 'x'.repeat(1024 * 1024 + 100) + '\n')
+  const oversized = statSync(logPath).size > 1024 * 1024
+  // tools/change 里 pruneAgents 会写一行 dbg，足够触发轮转检查
+  ctx.get = () => undefined
+  handlers['tools/change']()
+  check('超过 1MB 时轮转成 .1，主文件重新变小', () => {
+    assert.ok(oversized, '前置条件：灌完应超过上限')
+    assert.ok(ex(bakPath), '.1 备份应存在')
+    assert.ok(statSync(logPath).size < 1024 * 1024, `轮转后主文件应小于上限，实际 ${statSync(logPath).size}`)
+  })
+}
+
+console.log('\n' + (process.exitCode ? 'FAILED' : `all ${pass} checks passed`))
+
 console.log('\n' + (process.exitCode ? 'FAILED' : `all ${pass} checks passed`))

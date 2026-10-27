@@ -54,6 +54,7 @@ async function pluginConfig(patch) {
   return res.json()
 }
 function reloadProfile() {
+  assertLivePatchAllowed('热重载 profile（reloadProfile）')
   appendFileSync(PATCH, `# eval reload ${Date.now()}\n`)
 }
 
@@ -142,10 +143,22 @@ async function runOnce(task, arm, rep) {
 }
 
 // ---------- 臂控制 ----------
+// 真环境守卫：下面几处会直接改写本机 profile 的 cordis.patch.yml（把插件 disabled=true 再改回来），
+// 改错就是把 Aiden 日常在用的插件关掉。2026-10-27 发现该文件尾部堆了一串 "# eval reload" 注释，
+// 说明它被跑过而没有任何提示。现在必须显式 ALLOW_LIVE_PATCH=1 才允许写。
+function assertLivePatchAllowed(what) {
+  if (process.env.ALLOW_LIVE_PATCH === '1') return
+  throw new Error(
+    `拒绝执行：${what} 会改写本机真实 profile（${PATCH}）。\n` +
+    '这是评测脚手架，不该在不知情的情况下动到日常环境。\n' +
+    '确认要跑就带环境变量重试：ALLOW_LIVE_PATCH=1 node tests/eval-runner.mjs matrix',
+  )
+}
 async function setArm(arm) {
   if (arm === 'A') { await pluginConfig({ catalogMode: 'full' }); reloadProfile(); await sleep(4000) }
   if (arm === 'B') { await pluginConfig({ catalogMode: 'compact' }); reloadProfile(); await sleep(4000) }
   if (arm === 'C') {
+    assertLivePatchAllowed('C 臂（停用插件）')
     const txt = readFileSync(PATCH, 'utf8')
     if (!txt.includes('id: dsh-loadout')) appendFileSync(PATCH, '\n- id: dsh-loadout\n  disabled: true\n')
     else writeFileSync(PATCH, txt.replace(/(- id: dsh-loadout\n  disabled: )false/, '$1true'))
@@ -154,6 +167,7 @@ async function setArm(arm) {
   }
 }
 async function restorePlugin() {
+  assertLivePatchAllowed('恢复插件（restorePlugin）')
   const txt = readFileSync(PATCH, 'utf8')
   if (txt.includes('id: dsh-loadout')) {
     writeFileSync(PATCH, txt.replace(/(- id: dsh-loadout\n  disabled: )true/, '$1false'))
@@ -164,6 +178,7 @@ async function restorePlugin() {
 
 // ---------- 入口 ----------
 const [, , cmd, arg1] = process.argv
+if (cmd === 'matrix') assertLivePatchAllowed('matrix（会依次切 A/B/C 三臂并改动真实 profile）')
 await auth()
 
 if (cmd === 'run') {
