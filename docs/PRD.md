@@ -28,10 +28,15 @@ DSH 侧确认可用、本文件依赖的机制：
 
 两条硬约束，改代码时必须守住：
 
-- **restrict 只能管全局注册表里的工具。** agent 自己作用域注册的工具（团队协作那批
-  `send_message`/`spawn_teammate`）够不到，永远可见。靠可见性管它们的权限这条路不成立。
+- **restrict 只能管全局注册表里的工具。** agent 自己作用域注册的工具够不到，永远可见。
+  两个实例：团队协作那批（`send_message`/`spawn_teammate`/`team_task_*`），
+  以及本机实测的 `present`/`exit_plan_mode`/`workflow`/`ops_discover_tools`/`send_wechat`
+  ——它们出现在 `BUILTIN_GROUPS` 的 ops 组声明里，但不在 `ctx.tools.schemas()` 里，
+  规则命中不了，也不该指望靠归组管住它们。靠可见性管这些工具的权限这条路不成立。
 - **restrict 会同步派发 `tools/change`。** 监听该事件时若在回调里再 restrict，会同步无限递归卡死 Host。
   实现里用模块级 `isApplying` 锁挡住。
+- **子代理作用域里 `loadout`/`tools_search`/`tools_call` 是可用的**（2026-10-27 探针实测）。
+  这点与早期认知相反，`hideInSubagents` 的可行性前提因此成立，但默认仍关闭（见 3.11）。
 
 ## 三、行为规范
 
@@ -40,7 +45,7 @@ DSH 侧确认可用、本文件依赖的机制：
 | 档位 | 典型工具 | 行为 |
 |---|---|---|
 | 常驻 | 文件读写、bash、搜索、`loadout`/`tools_search`/`tools_call`/`browser` | 一直在工具列表里 |
-| 按需组 | browser、office、mail、ssh 等 | 默认隐藏，`loadout activate` 放出整组 |
+| 按需组 | chrome-devtools、univer、email、ssh 等 | 默认隐藏，`loadout activate` 放出整组 |
 | 观察区（trial） | 启动后才出现的未认领工具 | 隐藏，调用满 N 次自动转正 |
 | 长尾 | 没被任何规则认领的工具 | 保持可见；`tools_search` 找、`tools_call` 代理调 |
 
@@ -80,6 +85,9 @@ sandbox 10、ssh 6、ops 6、acp 3、mcp-resource 3、context7 2。
 full 模式按组列出**全量工具名**（名字可见、schema 仍藏），首行必须写明约束：
 这些工具不在工具列表里，直接调报 Unknown tool；连续用同组走 activate 整组，只偶尔用走
 `tools_search` + `tools_call`。约束必须写在脸上——模型看到清单的默认反应就是直接调。
+
+体积对照（本机 252 个工具、17 组实测）：full 6122 字符 ≈ 1531 token，
+compact 2482 字符 ≈ 621 token，差额约 910 token/轮。compact 只是 A/B 对照档，不是省 token 的默认值。
 
 ### 3.5 激活、收回、租约
 
@@ -133,10 +141,27 @@ review 只隐藏当时可见的外发组，之后 activate 仍可开。防注入
 全程 fail-open：任何异常路径先解除全部隐藏，宁可全量可见，不停在半隐藏状态。
 `applyMask` 里 restrict 抛错只记日志不重试。
 
+**deny 名单去重**：`applyMask` 先算 deny 清单（纯函数），若与上一次真正生效的清单完全相同
+（`st.maskApplied === true && st.lastDenyKey === key`），直接返回并累加 `st.skips`——
+不 dispose、不 restrict、不重算 token 估算、不写日志行。首次（`maskApplied` 为 false）必须真跑。
+理由：启动与热装会对每个 agent 各跑一遍，本机实测 852 行 applyMask 里绝大多数是 deny 没变的重复。
+
+**死 agent 清理**：`tools/change` 重分组前调 `pruneAgents()`，拿宿主 `agents.list()` 的真实 id 集合，
+把插件表里不在其中的条目连 disposer 一起删。判活**只认宿主注册表**：
+`agents` 服务不可用、`list()` 抛错、`list()` 返回空数组（视为未就绪）三种情况一律不删——
+删错一个活 agent，它身上的 restrict 就没人撤。启动阶段的 `retry@30000` 之后也清一次。
+
+**日志**：`loadout-debug.log` 单文件上限 1 MB，写入前检查，超过则轮转成 `.1`（只留一份备份）。
+
 ### 3.11 子代理
 
-子代理一律不隐藏（它作用域里没有 `loadout`，藏了没人能解套）。`hideInSubagents: true` 可强制开。
-判断方式：`ctx.agents.list()` 有、`roots()` 没有 → 子代理；判不出来按顶层处理（藏）。
+子代理默认不隐藏。判断方式：`ctx.agents.list()` 有、`roots()` 没有 → 子代理；
+判不出来按顶层处理（藏）。`hideInSubagents: true` 可强制开。
+
+**技术前提已更正**：2026-10-27 用探针子代理实测，子代理作用域里 `loadout` / `tools_search` /
+`tools_call` **都能看到、也能调用**（子代理里 `loadout list` 正常返回全部组状态）。
+因此"藏了没人能解套"不成立，默认关闭是产品选择——子代理被藏后每次都得先激活再干活，
+路径变长且它拿不到任务上下文所以激活什么只能猜。要开就显式设 `hideInSubagents: true`。
 
 ### 3.12 面板
 

@@ -108,6 +108,9 @@ MCP 工具（`mcp__<server>__<tool>`）始终按 server 名自动成组，不需
 - **读外网切断外联**：`web_fetch`/`web_search` 或浏览器、检索组的工具一返回，当轮把 `cutGroups` 里的组强制 deny（哪怕已激活）——切的是可见性不是组开关，恢复后用户状态原样。恢复有两条路：宿主发 `turn/end`（精确当轮）或 `cutLasts` 次调用后自动兜底；确需外发时模型向用户确认后用 `release` 解除，每次解除记日志。cut 期间走 `tools_call` 代理会被拒，UNKNOWN_TOOL 自愈会说明原因
 - **门面工具**：`browser` 常驻，把 chrome-devtools 的三十二个工具压成十二个动作（navigate/click/type/press/screenshot/snapshot/eval/tabs/switch/close/wait/scroll）。组没激活时用它兜底，组激活后仍可用（会附一句"有完整工具"的提示）。门面走 `ctx.tools.execute` 全局视图代理，和 tools_call 同一条路。门面在豁免名单里，永远不会被藏
 - 组表的 token 预算：目录只列**有工具的组**，空组不进系统提示
+- **deny 名单没变就不重跑**：掩码的 deny 集合与上一次完全相同且已生效时，`applyMask` 直接返回，不 dispose、不 restrict、不重算 token 估算。启动和热装时会对每个 agent 各跑一遍，这条省掉的是重复开销
+- **死 agent 自动清理**：`tools/change` 重分组前拿宿主 `agents.list()` 对一遍，插件自己表里已不在注册表的条目连 disposer 一起删。**判活只认宿主注册表**——服务不可用或 `list()` 返回空数组时一律不删，删错一个活 agent 会让它身上的 restrict 永久没人撤
+- `loadout-debug.log` 单文件上限 1 MB，超过轮转成 `.1`（只留一份备份）
 
 ## 已知限制
 
@@ -115,7 +118,7 @@ MCP 工具（`mcp__<server>__<tool>`）始终按 server 名自动成组，不需
 - `restrict` 会同步派发 `tools/change`，监听该事件时必须在回调里防重入，否则会递归卡死 Host。本插件用 `isApplying` 锁处理
 - 空闲收回按工具调用次数计，不是按对话轮数
 - 配置改动即时生效（重分组），但**已建 agent 的隐藏状态不会因为改 `hiddenGroups` 而重算**——那只影响新会话
-- **子代理一律不隐藏**：它作用域里没有 `loadout`，隐藏了就没人能解套。代价是子代理的上下文仍然是全量的（每次派子代理都吃一份完整 schema）
+- **子代理默认不隐藏**（`hideInSubagents: false`）。代价是子代理的上下文仍然是全量的（每次派子代理都吃一份完整 schema）。2026-10-27 探针实测：子代理作用域里 `loadout` / `tools_search` / `tools_call` 其实**都在**，所以"藏了就没人解套"这个原始理由不成立；保持关闭是产品选择（子代理被藏后每次都得自己先激活，行为路径变长），不是能力限制。要开就设 `hideInSubagents: true`
 - 报错自愈只在 `UNKNOWN_TOOL` 上生效，且只对**已归组且当前隐藏**的工具改写；未归组的工具本来就能调，不需要引导
 - 两个面板端点（state/config）带自守卫：自定义头 `x-dsh-loadout: 1` + Host 必须本机回环 + Origin 一致。手机经 remote-web-ui 隧道打不开面板，这是代价不是 bug
 
@@ -127,7 +130,7 @@ MCP 工具（`mcp__<server>__<tool>`）始终按 server 名自动成组，不需
 
 ```bash
 node tests/test-grouping.mjs   # 分组/匹配/配置/模式/切断的纯逻辑，29 条
-node tests/smoke.mjs           # 假 ctx 跑 apply()：注册/掩码/租约/自愈/面板/子代理/参数校验/端点守卫/观察区/模式/切断/会话接口/门面，81 条
+node tests/smoke.mjs           # 假 ctx 跑 apply()：注册/掩码/租约/自愈/面板/子代理/参数校验/端点守卫/观察区/模式/切断/会话接口/门面/去重/清理/日志轮转，88 条
 node tests/client-check.mjs    # 客户端那一半能否加载并注册面板
 node tests/sim.mjs             # 拿本机真实工具表对拍：哪些被藏、有没有误藏控制面
 ```
