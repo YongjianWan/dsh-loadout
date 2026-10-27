@@ -5,7 +5,7 @@
 // 全程 fail-open：任何错误只记日志，不限制工具。
 
 import { writeFile } from 'node:fs/promises'
-import { appendFileSync, readFileSync, existsSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, existsSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { writeFile as writeFileAsync } from 'node:fs/promises'
 
 const IDLE_CALLS = 30 // 组激活后连续多少次工具调用未碰组内工具就收回
@@ -13,6 +13,10 @@ const DSH_HOME = process.env.DSH_HOME ?? `${process.env.USERPROFILE}/.dsh`
 const STATS_PATH = `${DSH_HOME}/loadout-stats.json`
 const CONFIG_PATH = `${DSH_HOME}/loadout-config.json`
 const DEBUG_LOG = `${DSH_HOME}/loadout-debug.log`
+// 调试日志单文件上限：超过就轮转成 <name>.1（只留一份备份，不做多代）。
+// 起因：2026-10-27 实测单日写到 171KB / 1219 行，其中 852 行是 applyMask 的重复记录，
+// 无上限地追加会让这个文件变成事实上的无界日志。
+const DEBUG_LOG_MAX_BYTES = 1024 * 1024
 // 观察区转正名单（持久化：转正结果跨重启不丢，否则每次重启都从头试）
 const TRIAL_PATH = `${DSH_HOME}/loadout-trial.json`
 
@@ -69,8 +73,18 @@ function loadConfig() {
   }
 }
 
+function rotateDebugLogIfNeeded() {
+  try {
+    if (statSync(DEBUG_LOG).size < DEBUG_LOG_MAX_BYTES) return
+    renameSync(DEBUG_LOG, `${DEBUG_LOG}.1`)
+  } catch {}
+}
+
 function dbg(msg) {
-  try { appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${msg}\n`) } catch {}
+  try {
+    rotateDebugLogIfNeeded()
+    appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${msg}\n`)
+  } catch {}
 }
 
 // 中英同义词：工具描述是英文，中文查询词要靠这张表桥接
@@ -603,29 +617,63 @@ function approxTokens(schemas) {
   }
 }
 
+// visibleTokens 的计算要 JSON.stringify 一遍全量 schema（本机约 160K 字符），
+// 而 applyMask 在启动/热装时会对每个 agent 各跑一次，账算下来是几十次全量序列化。
+// 这是观测值不是功能值，缓一层就够：键 = 工具名清单 + deny 名单，容量 8 条 LRU。
+const TOKEN_CACHE_MAX = 8
+const tokenCache = new Map()
+function cachedVisibleTokens(all, deny) {
+  try {
+    const key = all.map((s) => s.name).join(',') + '#' + deny.join(',')
+    const hit = tokenCache.get(key)
+    if (hit !== undefined) {
+      tokenCache.delete(key) // 提到队尾（LRU）
+      tokenCache.set(key, hit)
+      return hit
+    }
+    const hidden = new Set(deny)
+    const val = approxTokens(all.filter((s) => !hidden.has(s.name)))
+    tokenCache.set(key, val)
+    if (tokenCache.size > TOKEN_CACHE_MAX) tokenCache.delete(tokenCache.keys().next().value)
+    return val
+  } catch {
+    return 0
+  }
+}
+
 let isApplying = false
 
 function applyMask(st, byName, log, label) {
   if (isApplying) { dbg(`applyMask SKIP(${label}) isApplying=true`); return }
   isApplying = true
   try {
+    // deny 名单先算（纯函数，不动任何状态），算完再判断"要不要真跑一遍"。
+    const deny = denyList(st, byName)
+    // 名单和上次完全一样、且上一次真跑成功过时，重复 restrict 是纯开销：
+    // 每次都会 dispose+restrict 一遍、写一行日志、再序列化一次全量 schema。
+    // 2026-10-27 实测日志里 852 行 applyMask 绝大多数是这种重复。
+    // 首次（maskApplied 还是 false）必须真跑一次——否则空 deny 的 agent 永远不会有掩码记录和 token 数。
+    const key = deny.join(',')
+    if (st.maskApplied === true && st.lastDenyKey === key) {
+      st.skips = (st.skips ?? 0) + 1
+      return
+    }
     if (st.disposer) {
       try { st.disposer() } catch (e) { log(`dispose failed: ${e.message}`) }
       st.disposer = null
     }
-    const deny = denyList(st, byName)
     try {
       if (deny.length > 0) st.disposer = st.agentCtx.tools.restrict({ deny })
+      st.lastDenyKey = key
+      st.maskApplied = true
       st.applyLog.push({ label, denyCount: deny.length, ok: true })
       // token 观测：把"这一轮模型实际看到多少 schema"记下来，验收时才有数可看。
       let visibleTokens = 0
       try {
-        const all = st.agentCtx.tools.schemas()
-        const hidden = new Set(deny)
-        visibleTokens = approxTokens(all.filter((s) => !hidden.has(s.name)))
+        visibleTokens = cachedVisibleTokens(st.agentCtx.tools.schemas(), deny)
       } catch {}
       st.lastVisibleTokens = visibleTokens
-      dbg(`applyMask(${label}) ok deny=${deny.length} visibleTokens≈${visibleTokens} tools=${deny.slice(0, 3).join('|')}`)
+      dbg(`applyMask(${label}) ok deny=${deny.length} visibleTokens≈${visibleTokens} skips=${st.skips ?? 0} tools=${deny.slice(0, 3).join('|')}`)
     } catch (e) {
       st.applyLog.push({ label, denyCount: deny.length, ok: false, error: String(e?.message ?? e) })
       log(`restrict failed (${label}): ${e?.message ?? e}`)
@@ -718,6 +766,8 @@ export function apply(ctx, config) {
     for (const delay of RETRY_DELAYS) {
       const t = setTimeout(() => {
         try {
+          // 最后一次重试顺手清一遍死 agent（启动阶段常有一批早就不存在的会话 id）。
+          if (delay === RETRY_DELAYS[RETRY_DELAYS.length - 1]) pruneAgents(`retry@${delay}`)
           const changed = reGroup(`retry@${delay}`)
           // 补默认掩码只针对"创建时组表还是空的"那些 agent。
           // 不能拿 hidden.size === 0 当条件——用户把组全激活后 hidden 恰好也是空集，
@@ -823,6 +873,43 @@ export function apply(ctx, config) {
       }
     }
     if (n > 0) log(`adopt(${label}): took over ${n} existing agent(s)`)
+    return n
+  }
+
+  // 死 agent 清理：agents Map 只在 agentCtx.effect 的 dispose 回调里删条目。
+  // 那个回调由宿主在 agent 销毁时触发——但会话被关掉/进程里早已失效的会话不一定走到它，
+  // 于是 Map 会攒着一堆死 id。后果是每次 tools/change 重分组都要对着它们白跑一遍
+  // applyMask（本机实测 22 个条目里有 2 个已经 20 小时没动过）。
+  // 判活只认宿主注册表：拿不到 agents 服务或 list() 抛错时一律不删——
+  // 删错一个活 agent，它身上的 restrict 就没人撤，工具会永久半隐藏。
+  function pruneAgents(label) {
+    let live = null
+    try {
+      const svc = ctx.get('agents')
+      live = typeof svc?.list === 'function' ? svc.list() : null
+    } catch (e) {
+      dbg(`prune(${label}): agents service unavailable, skip (${e?.message ?? e})`)
+      return 0
+    }
+    if (!Array.isArray(live)) {
+      dbg(`prune(${label}): agents.list() not an array, skip`)
+      return 0
+    }
+    const liveIds = new Set(live.map((a) => a?.id).filter(Boolean))
+    // 空表当"服务还没就绪"处理，不当"全部死了"——启动早期 list() 可能暂时返回空，
+    // 那时候把 agents 全清掉等于把活会话的掩码记录抹了。
+    if (liveIds.size === 0 && agents.size > 0) {
+      dbg(`prune(${label}): live list empty with ${agents.size} tracked, skip (likely not ready)`)
+      return 0
+    }
+    let n = 0
+    for (const [id, st] of [...agents]) {
+      if (liveIds.has(id)) continue
+      try { st.disposer?.() } catch {}
+      agents.delete(id)
+      n++
+    }
+    if (n > 0) log(`prune(${label}): dropped ${n} dead agent(s), ${agents.size} left`)
     return n
   }
 
@@ -957,6 +1044,9 @@ export function apply(ctx, config) {
     ctx.on('tools/change', () => {
       if (isApplying) return
       try {
+        // 先清死 agent 再重算：省掉对已消失会话的无谓 restrict + token 序列化。
+        // 放在 reGroup 之前，因为它和分组结果无关，没必要被 changed 拦住。
+        pruneAgents('tools/change')
         const changed = reGroup('tools/change')
         if (!changed) return
         for (const st of agents.values()) {

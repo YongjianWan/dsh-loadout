@@ -1,6 +1,6 @@
 {
   "name": "dsh-loadout",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "On-demand tool loadout for DeepSeek Harness: keep a small always-visible core, hide the rest behind per-group activation, and offer search plus a proxy call for long-tail tools.",
   "type": "module",
   "main": "./index.js",
