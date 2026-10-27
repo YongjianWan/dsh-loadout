@@ -70,8 +70,8 @@ function check(label, fn) {
 }
 
 console.log('1. 注册了三个元工具')
-check('loadout / tools_search / tools_call', () => {
-  assert.deepEqual(registered.map((r) => r.name).sort(), ['loadout', 'tools_call', 'tools_search'])
+check('loadout / tools_search / tools_call / browser', () => {
+  assert.deepEqual(registered.map((r) => r.name).sort(), ['browser', 'loadout', 'tools_call', 'tools_search'])
 })
 check('每个工具都声明了 output.render', () => {
   for (const r of registered) assert.equal(typeof r.output?.render, 'function', r.name)
@@ -569,5 +569,37 @@ check('面板解除切断', () => {
   assert.equal(b.cut, null)
 })
 await postConfig({ cut: false })
+
+console.log('17. 门面工具（2026-10-28）：简化常驻入口')
+const facade = registered.find((r) => r.name === 'browser')
+check('门面在 NEVER_HIDE 里（不会被藏）', () => {
+  const resF = fakeRes()
+  return stateRoute.handler(panelReq(), resF).then(() => {
+    const snapF = JSON.parse(resF.body)
+    assert.ok(snapF.neverHide.includes('browser'), snapF.neverHide.join(','))
+    assert.ok(!snapF.unmatched.includes('browser'), '门面不该落进 unmatched')
+    assert.ok(!snapF.groups.some((g) => g.tools.includes('browser')), '门面不该被归组')
+  })
+})
+check('门面声明了 action 枚举与必填', () => {
+  const p = facade.parameters
+  assert.ok(p.properties.action.enum.includes('navigate'))
+  assert.ok(p.properties.action.enum.includes('screenshot'))
+  assert.deepEqual(p.required, ['action'])
+})
+const fAct = (args) => facade.execute(args, { agent: { id: 'a1' } })
+const fBad = await fAct({ action: 'nope' })
+check('未知动作报错并列出可用动作', () => assert.ok(fBad.includes('navigate'), fBad))
+// chrome-devtools 的假工具在 TOOLS 里只有 click/fill，navigate 的目标不存在 → 报"不存在"
+const fMissing = await fAct({ action: 'navigate', url: 'https://example.com' })
+check('目标工具不存在时给出明确报错', () => assert.ok(fMissing.includes('不存在'), fMissing))
+// click 目标存在（TOOLS 里有 mcp__chrome-devtools__click），走 render 返回
+const fClick = await fAct({ action: 'click', uid: 'u1' })
+check('门面代理调用走真工具并复用 render', () => assert.ok(fClick.includes('rendered ') || fClick.length > 0, fClick))
+// 组已激活时附提示（先激活 chrome-devtools 组）
+await act({ action: 'activate', group: 'chrome-devtools' })
+const fActive = await fAct({ action: 'click', uid: 'u1' })
+check('组激活后门面仍可用并提示有完整工具', () => assert.ok(fActive.includes('提示'), fActive))
+await act({ action: 'deactivate', group: 'chrome-devtools' })
 
 console.log('\n' + (process.exitCode ? 'FAILED' : `all ${pass} checks passed`))

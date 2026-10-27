@@ -36,9 +36,10 @@ DSH 装到一定规模后，单次会话有 200 个左右的工具，每个工�
 
 | 工具 | 作用 |
 |---|---|
-| `loadout` | `list` 看状态、`activate`/`deactivate` 开关组、`stats` 看调用频率、`review` 看分档建议 |
+| `loadout` | `list` 看状态、`activate`/`deactivate` 开关组、`mode`/`release` 模式与切断、`stats` 看调用频率、`review` 看分档建议 |
 | `tools_search` | 按关键词搜工具，返回完整 schema。支持中文（内置中英同义词桥接） |
 | `tools_call` | 按名字代理调用工具。外发、远程执行、删除类一律拒绝 |
+| `browser` | 浏览器门面：navigate/click/type/press/screenshot/snapshot/eval/tabs/switch/close/wait/scroll 十二个动作，chrome-devtools 组没激活时的兜底入口 |
 
 ## 安装
 
@@ -105,6 +106,7 @@ MCP 工具（`mcp__<server>__<tool>`）始终按 server 名自动成组，不需
 - **可见性当权限**：`gatedGroups` 里的组（默认 ssh/email/kimi-cu）激活时要用户确认——模型第一次 `activate` 会拿到"去问用户"的引导，用户点头后带 `confirm:true` 重试才放行；含 gated 组的模式同理。面板直接改配置，是用户本人操作，不受此闸
 - **模式切换**：`mode` 动作执行模式的 activate/hide 清单，是一次性开关操作，不动清单之外的组（上次模式开的组不会自动关）。只读审阅的隐藏清单是人工策展，新装高危插件组记得补进 review 模式
 - **读外网切断外联**：`web_fetch`/`web_search` 或浏览器、检索组的工具一返回，当轮把 `cutGroups` 里的组强制 deny（哪怕已激活）——切的是可见性不是组开关，恢复后用户状态原样。恢复有两条路：宿主发 `turn/end`（精确当轮）或 `cutLasts` 次调用后自动兜底；确需外发时模型向用户确认后用 `release` 解除，每次解除记日志。cut 期间走 `tools_call` 代理会被拒，UNKNOWN_TOOL 自愈会说明原因
+- **门面工具**：`browser` 常驻，把 chrome-devtools 的三十二个工具压成十二个动作（navigate/click/type/press/screenshot/snapshot/eval/tabs/switch/close/wait/scroll）。组没激活时用它兜底，组激活后仍可用（会附一句"有完整工具"的提示）。门面走 `ctx.tools.execute` 全局视图代理，和 tools_call 同一条路。门面在豁免名单里，永远不会被藏
 - 组表的 token 预算：目录只列**有工具的组**，空组不进系统提示
 
 ## 已知限制
@@ -125,7 +127,7 @@ MCP 工具（`mcp__<server>__<tool>`）始终按 server 名自动成组，不需
 
 ```bash
 node tests/test-grouping.mjs   # 分组/匹配/配置/模式/切断的纯逻辑，29 条
-node tests/smoke.mjs           # 假 ctx 跑 apply()：注册/掩码/租约/自愈/面板/子代理/参数校验/端点守卫/观察区/模式/切断/会话接口，75 条
+node tests/smoke.mjs           # 假 ctx 跑 apply()：注册/掩码/租约/自愈/面板/子代理/参数校验/端点守卫/观察区/模式/切断/会话接口/门面，81 条
 node tests/client-check.mjs    # 客户端那一半能否加载并注册面板
 node tests/sim.mjs             # 拿本机真实工具表对拍：哪些被藏、有没有误藏控制面
 ```
