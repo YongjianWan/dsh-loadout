@@ -4,7 +4,7 @@
 
 > 2026-10-28：控制面主工具 `toolctl` 改名为 `loadout`，配置文件、统计文件同步改为 `loadout-*.json`（旧文件首次启动自动迁移，不丢配置和历史统计）。
 
-> 设计与取舍记录：[docs/design.md](docs/design.md)（为什么这么设计、哪些和原设计不一样、还没做完什么）。本文只讲怎么用。
+> 产品行为规范：[docs/PRD.md](docs/PRD.md)。内部决策记录与技术债清单不入库（只留本地）。本文只讲怎么用。
 
 ## 解决什么问题
 
@@ -134,7 +134,7 @@ node tests/sim.mjs             # 拿本机真实工具表对拍：哪些被藏�
 
 ## 验收计数
 
-`loadout {"action":"stats"}` 会报这几个数，对应设计清单「只看日志就能回答」那几条：
+`loadout {"action":"stats"}` 会报这几个数：
 
 - `visible schemas ≈ N tokens` —— 每个 agent 上一轮实际看到多少 schema（字符数 / 4 估算，只看趋势）
 - 自愈触发 N 次 / 搜索命中 N、未命中 N / 代理调用 N、代理拒绝 N

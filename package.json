@@ -12,6 +12,11 @@
   "files": ["index.js", "client.js", "cordis.patch.yml", "README.md"],
   "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "tools", "context", "loadout"],
   "license": "MIT",
+  "scripts": {
+    "test": "node tests/test-grouping.mjs && node tests/smoke.mjs && node tests/client-check.mjs",
+    "test:unit": "node tests/test-grouping.mjs && node tests/smoke.mjs && node tests/client-check.mjs",
+    "sim": "node tests/sim.mjs"
+  },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
