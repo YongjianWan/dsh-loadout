@@ -11,7 +11,7 @@
 #
 # 本条目按实际实现填写，核对过的数字：
 #   - 13 个组（browser/desktop/office/mail/remote/team/mem-admin/mcp-admin/search-ext/ops-admin/sched/goal/extras）
-#   - 3 个元工具（toolctl / tools_search / tools_call）
+#   - 3 个元工具（loadout / tools_search / tools_call）
 #   - 一次实测会话：162 个工具注册，152 个进组，10 个常驻核心
 
 url: https://github.com/OWNER/dsh-loadout   # 必须与仓库完全一致
