@@ -140,12 +140,12 @@ const ZH_SYNONYMS = {
 const NEVER_HIDE = new Set([
   'loadout', 'tools_search', 'tools_call',        // 本插件控制面：藏了就再也放不出来
   'absorb', 'compress', 'decompress',              // ACP 压缩/吸收协议，宿主会随时点名
+  'browser', 'office',                             // 门面工具：组隐藏时的简化入口，藏了就失去兜底
 ])
 
 // 控制面三件套：任何配置都动不了它们（neverHideReplace 也不行）。理由和 HTTP 三道闸一样：
 // 配置化可以，自锁留门不行——这三个被藏了就没有任何按钮能放出来。
 const CONTROL_PLANE = ['loadout', 'tools_search', 'tools_call']
-
 // 2026-10-27 全配置化：生效名单 = 控制面（钉死）+ 基础名单（默认 NEVER_HIDE，config.neverHideReplace 可换）+ config.neverHide 追加
 function effectiveNeverHide(config = {}) {
   const base = Array.isArray(config.neverHideReplace) ? config.neverHideReplace.map(String) : [...NEVER_HIDE]
@@ -1335,6 +1335,102 @@ export function apply(ctx, config) {
       }
     },
   })
+
+  // 10. 门面工具：组隐藏时的简化常驻入口。
+  // 动机：chrome-devtools 32 个工具、office 几十个，全藏则模型够不着，全放则一次烧掉几千 token。
+  // 门面只暴露最常用的十来个动作，内部翻译成真工具名走 ctx.tools.execute 全局视图——
+  // 模型只认识门面这一层，schema 恒定，不随组激活状态变化。
+  // 门面在 NEVER_HIDE 里，永远不会被藏（藏了就失去兜底意义，等于把组全关）。
+  // 不做互斥：组激活后门面照常可用，两条路都通，幂等。
+  const FACADES = {
+    browser: {
+      group: 'chrome-devtools',
+      desc: '浏览器简化入口（组未激活时的兜底）。navigate 打开网址、click 点元素、type 输入、press 按键、screenshot 截图、snapshot 取页面结构、eval 执行 JS、tabs 列出页面、switch 切换页面、close 关页、wait 等元素、scroll 滚动。',
+      actions: {
+        navigate: { tool: 'mcp__chrome-devtools__navigate_page', map: (a) => ({ url: a.url, type: a.newTab ? 'new' : undefined }) },
+        click: { tool: 'mcp__chrome-devtools__click', map: (a) => ({ uid: a.uid, selector: a.selector }) },
+        type: { tool: 'mcp__chrome-devtools__type_text', map: (a) => ({ uid: a.uid, selector: a.selector, text: a.text }) },
+        press: { tool: 'mcp__chrome-devtools__press_key', map: (a) => ({ key: a.key, uid: a.uid }) },
+        screenshot: { tool: 'mcp__chrome-devtools__take_screenshot', map: (a) => ({ fullPage: a.fullPage === true }) },
+        snapshot: { tool: 'mcp__chrome-devtools__take_snapshot', map: () => ({}) },
+        eval: { tool: 'mcp__chrome-devtools__evaluate_script', map: (a) => ({ expression: a.expression }) },
+        tabs: { tool: 'mcp__chrome-devtools__list_pages', map: () => ({}) },
+        switch: { tool: 'mcp__chrome-devtools__select_page', map: (a) => ({ pageId: a.pageId }) },
+        close: { tool: 'mcp__chrome-devtools__close_page', map: (a) => ({ pageId: a.pageId }) },
+        wait: { tool: 'mcp__chrome-devtools__wait_for', map: (a) => ({ text: a.text, selector: a.selector, timeout: a.timeout }) },
+        scroll: { tool: 'mcp__chrome-devtools__evaluate_script', map: (a) => ({ expression: `window.scrollBy(0, ${Number(a.by) || 600})` }) },
+      },
+    },
+  }
+
+  // 门面共享的调用路径：复用 tools_call 的全局视图执行 + render。
+  async function runFacadeTool(name, args, exec, log) {
+    const def = ctx.tools.get(name)
+    if (!def) return `门面目标工具不存在：${name}（该插件可能没装）`
+    const result = await ctx.tools.execute({
+      callId: `facade-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      arguments: args,
+      signal: exec?.signal,
+    })
+    if (result?.isError) return `调用 ${name} 失败：${result.error?.message ?? 'unknown'}`
+    try {
+      const blocks = def?.output?.render?.(args, result?.value)
+      if (Array.isArray(blocks) && blocks.length > 0) {
+        const text = blocks.map((b) => (b.type === 'text' ? b.text : `[${b.type}]`)).join('\n')
+        if (text) return text
+      }
+    } catch {}
+    return JSON.stringify(result?.value)
+  }
+
+  for (const [fname, f] of Object.entries(FACADES)) {
+    try {
+      ctx.tools.register({
+        name: fname,
+        description: f.desc,
+        parameters: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: Object.keys(f.actions), description: '要执行的动作' },
+            url: { type: 'string', description: 'navigate 用：网址' },
+            uid: { type: 'string', description: 'snapshot 拿到的元素 uid' },
+            selector: { type: 'string', description: 'CSS 选择器（与 uid 二选一）' },
+            text: { type: 'string', description: 'type/wait 用的文本' },
+            key: { type: 'string', description: 'press 用：按键名，如 Enter' },
+            expression: { type: 'string', description: 'eval 用：JS 表达式' },
+            pageId: { type: 'string', description: 'switch/close 用的页面 id' },
+            newTab: { type: 'boolean', description: 'navigate 是否开新标签页' },
+            fullPage: { type: 'boolean', description: 'screenshot 是否整页截图' },
+            by: { type: 'number', description: 'scroll 滚动像素，默认 600' },
+            timeout: { type: 'number', description: 'wait 超时毫秒' },
+          },
+          required: ['action'],
+          additionalProperties: false,
+        },
+        output: {
+          schema: { type: 'string' },
+          render: (_args, value) => [{ type: 'text', text: String(value) }],
+        },
+        execute: async (args, exec) => {
+          try {
+            const act = f.actions[args.action]
+            if (!act) return `未知动作 ${String(args.action)}，可用：${Object.keys(f.actions).join(', ')}`
+            // 组当前已激活时提示走真工具（门面仍可用，只是提醒有更全的路）
+            const st = agents.get(exec?.agent?.id)
+            const groupActive = st && !st.hidden.has(f.group)
+            const note = groupActive ? `（提示：${f.group} 组已激活，${act.tool.replace(/^mcp__[^_]+__|^[a-z]+_/, '')} 等完整工具可直接调用）` : ''
+            return await runFacadeTool(act.tool, act.map(args) ?? {}, exec, log) + (note ? `\n\n${note}` : '')
+          } catch (e) {
+            return `${fname} 门面失败：${e?.message ?? e}`
+          }
+        },
+      })
+      log(`facade ${fname} registered (group ${f.group}, ${Object.keys(f.actions).length} actions)`)
+    } catch (e) {
+      log(`facade ${fname} register failed: ${e?.message ?? e}`)
+    }
+  }
 
   // 8. 面板数据桥：只读快照 + 写配置。面板（client.js）通过这两个端点读写。
   // 安全闸：webServer.register 的路由不经过宿主 /api 那层浏览器鉴权（实测全站 401 唯独这两个 200），
