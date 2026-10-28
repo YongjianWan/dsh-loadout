@@ -10,15 +10,17 @@
 #   6. 一个 PR 最多 3 条
 #
 # 本条目按实际实现填写，核对过的数字：
-#   - 13 个组（browser/desktop/office/mail/remote/team/mem-admin/mcp-admin/search-ext/ops-admin/sched/goal/extras）
-#   - 3 个元工具（loadout / tools_search / tools_call）
-#   - 一次实测会话：162 个工具注册，152 个进组，10 个常驻核心
+#   - 16 个组：3 个 MCP server 自动分组（chrome-devtools 32 / kimi-cu 13 / context7 2）
+#     + 12 个手工前缀组（univer/email/ssh/mnemon/mcp-connector/team/schedule/goal/sandbox/ops/search-ext/agent）
+#     + extras 兜底组
+#   - 3 个元工具（toolctl / tools_search / tools_call）
+#   - 一次实测会话：162 个工具注册，165 个被隐藏（deny=165），基础工具（read/bash/shell）不受影响
 
-url: https://github.com/OWNER/dsh-loadout   # 必须与仓库完全一致
-name: OWNER/dsh-loadout                      # 列表中显示的链接文字
+url: https://github.com/YongjianWan/dsh-loadout
+name: YongjianWan/dsh-loadout
 category: tools                              # 或 dev；按需激活工具属于 tools
 description:
-  en: 'On-demand tool loadout for DSH: keeps a small always-visible core, hides the rest behind per-group activation, and offers search plus a proxy call for long-tail tools.'
-  zh: 'DSH 的按需工具装配：常驻一个小核心集，其余工具按组默认隐藏、需要时一句话激活，长尾工具用搜索加代理调用。'
-# icon: https://raw.githubusercontent.com/OWNER/dsh-loadout/main/assets/icon-180.png
-# tarball: https://github.com/OWNER/dsh-loadout/releases/latest/download/dsh-loadout.tgz
+  en: 'On-demand tool loadout for DSH: MCP tools auto-grouped by server, host plugin tools by prefix. Grouped tools hide by default, activate with one call. Ungrouped tools always visible.'
+  zh: 'DSH 的按需工具装配：MCP 工具按 server 自动分组，宿主插件工具按手工前缀分组。进组的默认隐藏、一句话激活，没进组的始终可见。'
+# icon: https://raw.githubusercontent.com/YongjianWan/dsh-loadout/main/assets/icon-180.png
+# tarball: https://github.com/YongjianWan/dsh-loadout/releases/latest/download/dsh-loadout.tgz
