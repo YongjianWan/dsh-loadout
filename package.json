@@ -12,6 +12,10 @@
   "files": ["index.js", "client.js", "cordis.patch.yml", "README.md"],
   "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "tools", "context", "loadout"],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YongjianWan/dsh-loadout.git"
+  },
   "scripts": {
     "test": "node tests/test-grouping.mjs && node tests/smoke.mjs && node tests/client-check.mjs",
     "test:unit": "node tests/test-grouping.mjs && node tests/smoke.mjs && node tests/client-check.mjs",
