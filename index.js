@@ -63,14 +63,44 @@ const DEFAULT_CONFIG = {
   modes: null,
 }
 
+// 2026-11-04 mtime 缓存：tools/result 热路径上每个事件都读盘 + 全量解析，纯浪费。
+// 键 = mtime+size；外部手改文件（不经面板）会改变 mtime，下一次读取照样接住——这是正确性要求。
+let configCache = null
 function loadConfig() {
+  let key = 'missing'
   try {
-    if (!existsSync(CONFIG_PATH)) return { ...DEFAULT_CONFIG }
-    const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
-    return { ...DEFAULT_CONFIG, ...raw }
+    const st = statSync(CONFIG_PATH)
+    key = `${st.mtimeMs}:${st.size}`
+  } catch {}
+  if (configCache && configCache.key === key) return configCache.value
+  let value
+  try {
+    value = key === 'missing'
+      ? { ...DEFAULT_CONFIG }
+      : { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) }
   } catch {
-    return { ...DEFAULT_CONFIG }
+    value = { ...DEFAULT_CONFIG }
   }
+  configCache = { key, value }
+  return value
+}
+
+// 原子写配置：直接写目标文件，中途崩溃会留半截 JSON，下次加载静默回退默认配置、
+// 面板攒的规则全丢。写临时文件再 rename，崩溃最多留个无害的 .tmp。
+async function writeConfigAtomic(obj) {
+  const tmp = `${CONFIG_PATH}.tmp`
+  await writeFileAsync(tmp, JSON.stringify(obj, null, 1), 'utf8')
+  renameSync(tmp, CONFIG_PATH)
+}
+
+// 插件管理器传入的 config（apply 第二个参数）：只有 idleCalls 与 baselineWindowMs
+// 从这里消费，其余字段一律以配置文件为准（双通道的归一另作决策，见 TECH_DEBT）。
+// resolveIdleCalls 让面板改 idleCalls 后目录文案即时换新（不再等插件重载）。
+let pluginConfig = {}
+function resolveIdleCalls(cfgNow) {
+  if (Number(pluginConfig?.idleCalls) > 0) return Number(pluginConfig.idleCalls)
+  if (Number(cfgNow?.idleCalls) > 0) return Number(cfgNow.idleCalls)
+  return IDLE_CALLS
 }
 
 function rotateDebugLogIfNeeded() {
@@ -354,8 +384,11 @@ function buildGroups(schemaNames, config = {}, trialSet = null) {
   // 新插件观察区：启动窗口之后才出现的未认领工具进隐藏的 trial 组，用过 N 次自动转正。
   // 控制面在上面的 neverHide 检查里已排除，永远到不了这里；规则/MCP 认领的也到不了（先匹配）。
   const promoteAfter = Number(config.trialPromoteAfter) > 0 ? Number(config.trialPromoteAfter) : 3
+  // 组名撞车处理之一：trial 是硬编码特殊名（转正逻辑、tools/result、面板都吃这个名字），
+  // 用户规则组占了它就换名，观察区的特殊行为不污染用户组。
+  const trialName = ruleGroups.has('trial') ? 'trial-obs' : 'trial'
   const trial = trialSet && config.trial !== false
-    ? { name: 'trial', desc: `新插件观察区：启动后才出现的未认领工具，默认隐藏，用过 ${promoteAfter} 次自动转正`, tools: [] }
+    ? { name: trialName, desc: `新插件观察区：启动后才出现的未认领工具，默认隐藏，用过 ${promoteAfter} 次自动转正`, tools: [] }
     : null
 
   for (const name of schemaNames) {
@@ -385,17 +418,26 @@ function buildGroups(schemaNames, config = {}, trialSet = null) {
     // 一直在的未认领工具保持可见——fail-open 方向不变，观察区只收"迟到者"。
     if (trial && trialSet.has(name)) {
       trial.tools.push(name)
-      toolToGroup.set(name, 'trial')
+      toolToGroup.set(name, trialName)
     } else {
       unmatched.push(name)
     }
   }
 
+  // 组名撞车处理之二：MCP server 名与规则组同名时 byName 会二存一，被覆盖那组的工具
+  // 从 deny 名单静默消失（等于静默放行一整个 server）。MCP 侧改名 mcp:<server>，两组都保住。
+  for (const [srv, g] of [...mcpGroups]) {
+    if (!ruleGroups.has(srv)) continue
+    const renamed = `mcp:${srv}`
+    mcpGroups.delete(srv)
+    mcpGroups.set(renamed, { ...g, name: renamed, desc: `MCP server: ${srv}（与规则组 ${srv} 同名，自动改名）` })
+    for (const t of g.tools) toolToGroup.set(t, renamed)
+  }
   // 空组也保留：面板要能看到"这条规则在本机没匹配到任何工具"
   const groups = [...mcpGroups.values(), ...ruleGroups.values(), ...(trial && trial.tools.length > 0 ? [trial] : [])]
   const byName = new Map(groups.map((g) => [g.name, g]))
 
-  return { groups, byName, toolToGroup, unmatched, trial: trial ? new Set(trial.tools) : new Set() }
+  return { groups, byName, toolToGroup, unmatched, trial: trial ? new Set(trial.tools) : new Set(), trialName }
 }
 
 // 2026-10-27 改版：从"每组三个代表名"改成"全量名字可见"（消边界，不是打补丁）。
@@ -554,7 +596,8 @@ function denyList(st, byName) {
       if (row) out.push(...row.tools)
     }
   }
-  return out
+  // hidden 与 cut 重叠时同一工具会进两遍名单；restrict 容重复，但名单越干净越好对账
+  return [...new Set(out)]
 }
 
 // 报错自愈用的引导文案：被隐藏的工具直接调用时返回 UNKNOWN_TOOL，
@@ -643,8 +686,33 @@ function cachedVisibleTokens(all, deny) {
 
 let isApplying = false
 
+// 掩码重入补跑队列（2026-11-04 修）：restrict 同步派发 tools/change，重入的 applyMask 会被
+// isApplying 挡下——但挡下不等于没事，调用方的 st.hidden 那一刻可能已改，不重跑就分叉到
+// 下一次触发之前。跳过的调用进队列，当前 restrict 落地后在 finally 里按 FIFO 补跑，
+// 各带触发时那版组表，最后一条为准。5 轮打不住记日志丢弃，不做无界重试。
+const deferredMasks = []
+let drainRunning = false
+// restrict 同步派发的 tools/change 在 isApplying 期间会被整个丢弃——那一次注册表变化就丢了，
+// 要等到下一次注册表事件才重分组。挂 pending 旗，掩码落地后在 finally 里补放一次。
+let toolsChangePending = false
+let replayToolsChange = null
+let replayDepth = 0
+function drainDeferredMasks(log) {
+  if (drainRunning) return
+  drainRunning = true
+  try {
+    for (let round = 0; round < 5 && deferredMasks.length > 0; round++) {
+      const batch = deferredMasks.splice(0)
+      for (const [st, bn, label] of batch) applyMask(st, bn, log, `deferred:${label}`)
+    }
+    if (deferredMasks.length > 0) log(`deferred masks dropped after 5 rounds: ${deferredMasks.length}`)
+  } finally {
+    drainRunning = false
+  }
+}
+
 function applyMask(st, byName, log, label) {
-  if (isApplying) { dbg(`applyMask SKIP(${label}) isApplying=true`); return }
+  if (isApplying) { deferredMasks.push([st, byName, label]); dbg(`applyMask DEFER(${label})`); return }
   isApplying = true
   try {
     // deny 名单先算（纯函数，不动任何状态），算完再判断"要不要真跑一遍"。
@@ -682,6 +750,16 @@ function applyMask(st, byName, log, label) {
     trimLog(st)
   } finally {
     isApplying = false
+    drainDeferredMasks(log)
+    if (toolsChangePending) {
+      toolsChangePending = false
+      if (replayDepth < 5 && typeof replayToolsChange === 'function') {
+        replayDepth++
+        try { dbg('tools/change replayed after mask settled'); replayToolsChange() } finally { replayDepth-- }
+      } else {
+        log('tools/change replay dropped (depth cap or unavailable)')
+      }
+    }
   }
 }
 
@@ -689,10 +767,9 @@ export const name = 'dsh-loadout'
 export const inject = ['tools']
 
 export function apply(ctx, config) {
+  pluginConfig = config ?? {}
   const userCfg = loadConfig()
-  const idleCalls = Number(config?.idleCalls) > 0
-    ? Number(config.idleCalls)
-    : (Number(userCfg.idleCalls) > 0 ? Number(userCfg.idleCalls) : IDLE_CALLS)
+  const idleCalls = resolveIdleCalls(userCfg)
   const log = (msg) => ctx.logger.info(`[dsh-loadout] ${msg}`)
 
   // 1. 枚举全局注册表并归组
@@ -703,6 +780,8 @@ export function apply(ctx, config) {
   // 上一次归组时的组名集合：tools/change 后新出现的组要对已有会话补"默认隐藏"，
   // 否则 trial 组、新 MCP server 组对已开着的会话等于默认放行（新建会话不受影响）。
   let prevGroupKeys = new Set()
+  // 观察区组名：buildGroups 撞名时改叫 trial-obs，这里跟着换（消费方是 tools/result 转正逻辑和 state 端点）
+  let trialGroupName = 'trial'
 
   // 新插件观察区状态。baseline = 启动窗口（35 秒）内出现过的工具集合——窗口期内的迟到者
   // 算 baseline（覆盖启动时序竞争：3s/10s/30s 重试才注册的工具不该进观察区）；
@@ -749,6 +828,7 @@ export function apply(ctx, config) {
     byName = built.byName
     toolToGroup = built.toolToGroup
     unmatched = built.unmatched
+    trialGroupName = built.trialName
     log(`reGroup(${label}): ${names.length} tools, ${built.toolToGroup.size} grouped/${unmatched.length} visible, ${byName.size} groups`)
     return true
   }
@@ -807,7 +887,11 @@ export function apply(ctx, config) {
           name: 'tool-groups',
           order: inner.systemPrompt.getSectionOrder('MCP_SERVERS'),
           interpolate: false,
-          text: () => buildCatalog(byName, { idleCalls, unmatchedCount: unmatched.length, extra: loadConfig().catalogNote, mode: loadConfig().catalogMode }),
+          // idleCalls 在闭包里运行时解析：面板改完即刻反映到目录文案（2026-11-04 修，原目录数字要等插件重载）
+          text: () => {
+            const cfgNow = loadConfig()
+            return buildCatalog(byName, { idleCalls: resolveIdleCalls(cfgNow), unmatchedCount: unmatched.length, extra: cfgNow.catalogNote, mode: cfgNow.catalogMode })
+          },
         })
         log('catalog section registered')
       } catch (e) {
@@ -935,7 +1019,7 @@ export function apply(ctx, config) {
       try {
         if (exec?.name) bumpStat(exec.name)
         // 观察区转正：trial 组工具调用够次数 → 转正回可见，全局生效并持久化
-        if (exec?.name && toolToGroup.get(exec.name) === 'trial') {
+        if (exec?.name && toolToGroup.get(exec.name) === trialGroupName) {
           const cfgT = loadConfig()
           const needT = Number(cfgT.trialPromoteAfter) > 0 ? Number(cfgT.trialPromoteAfter) : 3
           if (statTotal(exec.name) >= needT) {
@@ -1039,28 +1123,36 @@ export function apply(ctx, config) {
     log(`tools/post-execute listener failed: ${e?.message ?? e}`)
   }
 
-  // 6. 注册表变动（热装插件、MCP 重连）时重归组，并对存活的 agent 重算 mask
-  try {
-    ctx.on('tools/change', () => {
-      if (isApplying) return
-      try {
-        // 先清死 agent 再重算：省掉对已消失会话的无谓 restrict + token 序列化。
-        // 放在 reGroup 之前，因为它和分组结果无关，没必要被 changed 拦住。
-        pruneAgents('tools/change')
-        const changed = reGroup('tools/change')
-        if (!changed) return
-        for (const st of agents.values()) {
-          // 新出现的组（trial、新 MCP server）对已有会话补默认隐藏，和新建会话口径一致
-          for (const [n, row] of byName) {
-            if (row.tools.length > 0 && !prevGroupKeys.has(n)) st.hidden.add(n)
-          }
-          applyMask(st, byName, log, 'reGroup')
+  // 6. 注册表变动（热装插件、MCP 重连）时重归组，并对存活的 agent 重算 mask。
+  // isApplying 期间只挂旗不处理，由 applyMask 的 finally 补放（见 deferredMasks 注释）。
+  const onToolsChange = () => {
+    if (isApplying) { toolsChangePending = true; return }
+    try {
+      // 先清死 agent 再重算：省掉对已消失会话的无谓 restrict + token 序列化。
+      // 放在 reGroup 之前，因为它和分组结果无关，没必要被 changed 拦住。
+      pruneAgents('tools/change')
+      const changed = reGroup('tools/change')
+      if (!changed) return
+      // hiddenGroups 白名单口径（2026-11-04 修）：配了白名单时新组按白名单决定默认可见性，
+      // 与 seedAgent / retry 种子路径同口径；没配（null）才全部默认隐藏。
+      const cfgH = loadConfig()
+      const configuredH = Array.isArray(cfgH.hiddenGroups) ? new Set(cfgH.hiddenGroups) : null
+      for (const st of agents.values()) {
+        // 新出现的组（trial、新 MCP server）对已有会话补默认隐藏，和新建会话口径一致
+        for (const [n, row] of byName) {
+          if (row.tools.length === 0 || prevGroupKeys.has(n)) continue
+          if (configuredH === null || configuredH.has(n)) st.hidden.add(n)
         }
-        log(`tools/change: regrouped, masks reapplied to ${agents.size} agent(s)`)
-      } catch (e) {
-        log(`tools/change handler failed: ${e?.message ?? e}`)
+        applyMask(st, byName, log, 'reGroup')
       }
-    })
+      log(`tools/change: regrouped, masks reapplied to ${agents.size} agent(s)`)
+    } catch (e) {
+      log(`tools/change handler failed: ${e?.message ?? e}`)
+    }
+  }
+  replayToolsChange = onToolsChange
+  try {
+    ctx.on('tools/change', onToolsChange)
   } catch (e) {
     log(`tools/change listener failed: ${e?.message ?? e}`)
   }
@@ -1591,7 +1683,7 @@ export function apply(ctx, config) {
                   enabled: cfg.trial !== false,
                   promoteAfter: Number(cfg.trialPromoteAfter) > 0 ? Number(cfg.trialPromoteAfter) : 3,
                   promoted: [...promoted].sort(),
-                  pending: [...(byName.get('trial')?.tools ?? [])],
+                  pending: [...(byName.get(trialGroupName)?.tools ?? [])],
                 },
                 gatedGroups: [...effectiveGated(cfg)],
                 gatedGroupsRaw: Array.isArray(cfg.gatedGroups) ? cfg.gatedGroups : null,
@@ -1650,9 +1742,10 @@ export function apply(ctx, config) {
               try {
                 const next = JSON.parse(Buffer.concat(chunks).toString('utf8'))
                 const merged = { ...loadConfig(), ...(next && typeof next === 'object' ? next : {}) }
-                if (Array.isArray(merged.hiddenGroups)) {
-                  merged.hiddenGroups = merged.hiddenGroups.filter((g) => byName.has(g))
-                }
+                // 2026-11-04 修：保存时不再按当前组表过滤 hiddenGroups——用户提前给未上线组
+                // 写的默认隐藏，等组上线那天生效（原实现保存即静默删名）。
+                if (merged.hiddenGroups !== null && !Array.isArray(merged.hiddenGroups)) merged.hiddenGroups = null
+                if (Array.isArray(merged.hiddenGroups)) merged.hiddenGroups = merged.hiddenGroups.map(String)
                 if (Array.isArray(merged.groups)) {
                   // 规则校验：name 必填、至少一条匹配方式；非法规则直接拒绝，不留半条
                   const bad = []
@@ -1699,7 +1792,7 @@ export function apply(ctx, config) {
                 if (merged.modes !== null && (typeof merged.modes !== 'object' || Array.isArray(merged.modes))) merged.modes = null
                 if (merged.mcpGroups !== false) merged.mcpGroups = null
                 if (!(Number(merged.idleCalls) > 0)) merged.idleCalls = IDLE_CALLS
-                await writeFileAsync(CONFIG_PATH, JSON.stringify(merged, null, 1), 'utf8')
+                await writeConfigAtomic(merged)
                 // 配置改完立刻重归组并对存活 agent 重算（不必等重启）
                 const changed = reGroup('config-save')
                 if (changed) for (const st of agents.values()) applyMask(st, byName, log, 'config-save')

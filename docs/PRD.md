@@ -24,7 +24,7 @@ DSH 侧确认可用、本文件依赖的机制：
 | `agent/created` 事件 | 新会话设置默认隐藏 |
 | `systemPrompt.section()` | 注入工具目录 |
 | `ctx.tools.execute()` 不传 agent | 走全局视图，调用被 restrict 隐藏的工具（代理与门面都靠它） |
-| `turn/end` 事件 | 会话级事件，用于切断外联的精确恢复（**未实测**，见 TECH_DEBT） |
+| `turn/end` 事件 | 会话级事件。**插件层实测收不到**（2026 年 11 月 4 日全量日志 0 次触发），切断恢复唯一生效路径是 `cutLasts` 兜底；监听保留，不依赖（见 TECH_DEBT #3） |
 
 两条硬约束，改代码时必须守住：
 
@@ -72,7 +72,9 @@ DSH 侧确认可用、本文件依赖的机制：
 
 规则是数据不是代码：内置 `BUILTIN_GROUPS`，配置文件 `groups` 优先，面板可改。
 三种匹配方式按顺序：全名 → 前缀 → 正则。组表保持扁平，不做嵌套和依赖。
-MCP 工具按 `mcp__<server>__` 前缀自动成组，新接 server 不用改规则。
+MCP 工具按 `mcp__<server>__` 前缀自动成组，新接 server 不用改规则。MCP server 名与规则组同名时，
+MCP 侧自动改名 `mcp:<server>`，两组都保留、谁也不静默丢（2026-11-04 修）；观察区组名与用户规则组
+撞名时同理改叫 `trial-obs`。
 
 本机现状（2026-10-27 实测，会随插件安装变化）：17 组，含 chrome-devtools 32、kimi-cu 13、
 univer 14、mnemon 17、mcp-connector 25、tieba 35、bili 20、search-ext 13、email 11、
@@ -126,7 +128,9 @@ review 只隐藏当时可见的外发组，之后 activate 仍可开。防注入
 （默认 email/ssh/kimi-cu/bili/tieba/ops/mcp-connector/sandbox）强制并入 deny——
 **不动 st.hidden**，切的是可见性不是组开关，恢复后用户状态原样。
 
-恢复两条路：宿主 `turn/end` 事件（当轮精确）、`cutLasts` 次调用后兜底（默认 30）。
+恢复：`cutLasts` 次工具调用后兜底（默认 30，实测生效）。宿主 `turn/end` 事件插件层收不到，
+按轮精确恢复不存在；切断按 tick 计数，agent 静默期间 tick 不走，切断会跨轮存活到下次工具调用
+凑满次数——比「当轮切断」保守，定为接受的语义（见 DECISIONS 十四）。
 人工解除走 `release`，每次记日志。切断期间 `tools_call` 代理拒绝，UNKNOWN_TOOL 自愈改写成切断说明。
 
 ### 3.9 门面
@@ -141,10 +145,16 @@ review 只隐藏当时可见的外发组，之后 activate 仍可开。防注入
 全程 fail-open：任何异常路径先解除全部隐藏，宁可全量可见，不停在半隐藏状态。
 `applyMask` 里 restrict 抛错只记日志不重试。
 
-**deny 名单去重**：`applyMask` 先算 deny 清单（纯函数），若与上一次真正生效的清单完全相同
+**deny 名单去重**：`denyList` 返回前 Set 去重——hidden 与 cut 重叠时同一工具只出现一次（2026-11-04 修）。
+**deny 未变不重跑**：`applyMask` 先算 deny 清单（纯函数），若与上一次真正生效的清单完全相同
 （`st.maskApplied === true && st.lastDenyKey === key`），直接返回并累加 `st.skips`——
 不 dispose、不 restrict、不重算 token 估算、不写日志行。首次（`maskApplied` 为 false）必须真跑。
 理由：启动与热装会对每个 agent 各跑一遍，本机实测 852 行 applyMask 里绝大多数是 deny 没变的重复。
+
+**掩码重入补跑（2026-11-04）**：`restrict` 同步派发的 `tools/change` 在掩码应用途中到达时，
+整条处理不丢弃——挂 pending 旗，掩码落地后在 `applyMask` 的 finally 里补放一次；
+同理被 `isApplying` 挡下的 `applyMask` 进 `deferredMasks` 队列按 FIFO 补跑
+（各带触发时那版组表，最后一条为准；补跑与补放各限 5 轮，超出记日志丢弃，不做无界重试）。
 
 **死 agent 清理**：`tools/change` 重分组前调 `pruneAgents()`，拿宿主 `agents.list()` 的真实 id 集合，
 把插件表里不在其中的条目连 disposer 一起删。判活**只认宿主注册表**：
@@ -170,8 +180,9 @@ review 只隐藏当时可见的外发组，之后 activate 仍可开。防注入
 - 规则页含高级区：豁免名单、代理黑名单、自愈文案、目录附言、观察区、gated 组、切断外联、模式表、MCP 开关、排行窗口、子代理、目录版本
 - 会话页：每个 agent 的真实开关，点组名可直接激活/收回（用户本人操作，不过 gated 闸，记日志），
   显示当前模式与切断状态，可解除切断
-- 面板三个 HTTP 端点（state/config/session）自带三道闸：自定义头 `x-dsh-loadout: 1`、
-  Host 必须本机回环、Origin 与 Host 一致
+- 面板 HTTP 端点共四个（state/config/session/mint-url），自带三道闸：自定义头 `x-dsh-loadout: 1`、
+  Host 必须本机回环、Origin 与 Host 一致。前三个是面板读写；mint-url 只服务评测执行器——
+  铸带 token 的完整 owner URL，写操作级闸 + 每次调用记日志
 
 ## 四、当前能力边界（做不到的）
 
@@ -179,6 +190,12 @@ review 只隐藏当时可见的外发组，之后 activate 仍可开。防注入
   三档实际落地两档。`tools_search` 仍是有用的兜底入口。
 - 质量收益无自有评测证据（"工具超过 30-50 个准确率下降"是厂商文档论断）。
 - 安全模型建立在"模型会读系统提示"上：目录、自愈、门面提示全靠模型照做，插件层只能变窄不能堵死。
+- 代理/门面调用不产生 `tools/result`：调用频率与 `review` 排行漏记这些调用；trial 转正只对直接
+  调用计数；门面调用不刷新组活跃度，该组可能被空闲收回误伤（`tools_call` 有手工补记，门面没有。
+  盲视范围见 TECH_DEBT #9）。
+- 安全边界定位：gated 的 `confirm:true` 是模型自声明，本机进程改 `loadout-config.json` 或直接调
+  面板端点即可绕过全部插件层约束。插件层定位是省 token 与防手滑，不是安全边界；enforcement 只能
+  长在宿主层（工具调用策略钩子，见 TECH_DEBT #5）。
 
 ## 五、暂不做
 

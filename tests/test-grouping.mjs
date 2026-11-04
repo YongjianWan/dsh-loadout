@@ -68,6 +68,12 @@ check('mcpGroups:false 时 MCP 工具不再自动归组', () => {
   const r = M.buildGroups(['mcp__chrome-devtools__click'], { mcpGroups: false })
   assert.equal(r.toolToGroup.size, 0)
 })
+check('MCP server 与规则组同名：MCP 侧自动改名 mcp: 前缀，两组都在', () => {
+  const r = M.buildGroups(['mcp__email__send_later', 'email_send'])
+  assert.deepEqual(r.byName.get('email').tools, ['email_send'])
+  assert.deepEqual(r.byName.get('mcp:email').tools, ['mcp__email__send_later'])
+  assert.equal(r.toolToGroup.get('mcp__email__send_later'), 'mcp:email')
+})
 
 console.log('4. 前缀 / 全名 / 正则三种匹配')
 check('前缀匹配', () => {
@@ -151,6 +157,13 @@ check('trial 组带转正说明，次数取自配置', () => {
 check('空候选时 trial 组不进组表', () => {
   const r = M.buildGroups(['old_thing'], {}, new Set())
   assert.ok(!r.byName.has('trial'))
+})
+check('规则组占用 trial 名：观察区自动改叫 trial-obs，互不污染', () => {
+  const rules = [{ name: 'trial', desc: 'x', prefixes: ['tr_'] }]
+  const r = M.buildGroups(['tr_a', 'late_1'], { groups: rules }, new Set(['late_1']))
+  assert.deepEqual(r.byName.get('trial').tools, ['tr_a'])
+  assert.equal(r.toolToGroup.get('late_1'), 'trial-obs')
+  assert.equal(r.trialName, 'trial-obs')
 })
 
 console.log('8. 模式切换与切断外联的配置纯逻辑')

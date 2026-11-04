@@ -652,7 +652,91 @@ handlers['tools/change']()
 const afterEmpty = await snapAgents()
 check('list() 空数组时不当作全死，保留记录', () => assert.ok(afterEmpty.some((a) => a.id === 'a1'), JSON.stringify(afterEmpty.map((a) => a.id))))
 
-console.log('20. 调试日志轮转')
+console.log('20. 2026-11-04 修复回归：hiddenGroups 口径 / 目录同步 / 外改配置 / deny 去重')
+// (a) hiddenGroups 保存保留未上线的组名（原实现按当前组表过滤、保存即删）
+const r8 = await postConfig({ hiddenGroups: ['email', 'not_yet_exist'] })
+check('hiddenGroups 保存时保留未上线的组名', () => {
+  assert.equal(r8.code, 200)
+  const saved = JSON.parse(readFileSync(join(home, 'loadout-config.json'), 'utf8'))
+  assert.ok(saved.hiddenGroups.includes('not_yet_exist'), JSON.stringify(saved.hiddenGroups))
+})
+// (b) 运行中新组按白名单口径对已有会话放行（原实现无条件补隐藏）
+TOOLS.push('mcp__brand_new_server__do')
+handlers['tools/change']()
+{
+  const r = fakeRes()
+  await stateRoute.handler(panelReq(), r)
+  const me = JSON.parse(r.body).agents.find((x) => x.id === 'a1')
+  check('白名单外的新 MCP 组对已有会话默认可见', () => {
+    assert.ok(me, 'agents 里应有 a1')
+    assert.ok(!me.hidden.includes('brand_new_server'), me.hidden.join(','))
+  })
+  check('白名单内的组照旧隐藏', () => {
+    assert.ok(me.hidden.includes('email'), me.hidden.join(','))
+  })
+}
+await postConfig({ hiddenGroups: null })
+// (c) 面板改 idleCalls，目录文案同步换新值（原实现要等插件重载）
+await postConfig({ idleCalls: 33 })
+check('面板改 idleCalls 后目录文案立即换新值', () => {
+  const sec = sections.find((s) => typeof s.text === 'function')
+  assert.ok(sec.text().includes('33'), sec.text().slice(0, 200))
+})
+await postConfig({ idleCalls: 30 })
+// (d) 外部手改配置文件（不经面板）下一次读取即生效——mtime 缓存的正确性要求
+writeFileSync(join(home, 'loadout-config.json'), JSON.stringify({ catalogNote: '外部手改的一行' }), 'utf8')
+{
+  const r = fakeRes()
+  await stateRoute.handler(panelReq(), r)
+  check('外部手改配置被下一次读取接住', () => {
+    assert.equal(JSON.parse(r.body).catalogNote, '外部手改的一行')
+  })
+}
+await postConfig({ catalogNote: null })
+// (e) cut 覆盖激活态：被切组进 deny，且与 hidden 名单重叠时同一名只出现一次
+await postConfig({ cut: true })
+await act({ action: 'activate', group: 'bili' })
+restrictCalls.length = 0
+handlers['tools/result']({ name: 'web_search', agent: { id: 'a1' } })
+check('cut 把已激活组并入 deny 且名单去重', () => {
+  const denyDup = restrictCalls[restrictCalls.length - 1]?.deny ?? []
+  assert.ok(denyDup.includes('bili_run'), '被切的激活组应在 deny 里：' + denyDup.join(','))
+  assert.equal(denyDup.filter((x) => x === 'bili_run').length, 1, denyDup.join(','))
+})
+await act({ action: 'release' })
+await act({ action: 'deactivate', group: 'bili' })
+await postConfig({ cut: false })
+// (f) 掩码应用途中注册表变化（等价热装插件）：被挡下的重入掩码要补跑，不能留着分叉
+{
+  const a2Calls = []
+  let reenterDone = false
+  const reenterCtx = {
+    tools: {
+      restrict(f) {
+        a2Calls.push(f)
+        if (!reenterDone) {
+          reenterDone = true
+          TOOLS.push('mcp__mid_mask__tool')
+          handlers['tools/change']()
+        }
+        return () => {}
+      },
+    },
+    effect: (fn) => { fn(); return () => {} },
+  }
+  ctx.get = (n) => (n === 'agents'
+    ? { list: () => [{ id: 'a1' }, { id: 'a2' }], roots: () => [{ id: 'a1' }, { id: 'a2' }] }
+    : undefined)
+  handlers['agent/created']({ agent: { id: 'a2', ctx: reenterCtx }, source: 'startup' })
+  check('restrict 途中注册表变化：新组的掩码在当次调用内补跑', () => {
+    const last = a2Calls[a2Calls.length - 1]
+    assert.ok(last, 'a2 应有 restrict 记录')
+    assert.ok(last.deny.includes('mcp__mid_mask__tool'),
+      '当次补跑应把新组工具并入 deny：' + last.deny.join(','))
+  })
+}
+
+console.log('21. 调试日志轮转')
 {
   const { statSync, existsSync: ex, appendFileSync: app } = await import('node:fs')
   const { join } = await import('node:path')

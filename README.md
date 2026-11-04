@@ -20,7 +20,7 @@ DSH 装到一定规模后，单次会话有 200 个左右的工具，每个工�
 还有两把横切开关：
 
 - **模式切换**：`loadout {"action":"mode","mode":"coding"}` 一个开关切整套组。内置写代码 / 写材料 / 运维 / 只读审阅四档，`config.modes` 可改可增
-- **读外网切断外联**：浏览器或网页读取一调用，当轮自动藏掉发邮件、ssh、发消息等外发组——防提示注入最实在的一刀，下一轮自动恢复，紧急可用 `loadout {"action":"release"}` 人工解除。**默认关闭**，需要时 `cut: true` 或面板打开
+- **读外网切断外联**：浏览器或网页读取一调用，自动藏掉发邮件、ssh、发消息等外发组——防提示注入最实在的一刀，持续 `cutLasts` 次工具调用后自动恢复（宿主按轮收尾事件插件收不到，兜底路径实测生效；切断可能跨轮存活），紧急可用 `loadout {"action":"release"}` 人工解除。**默认关闭**，需要时 `cut: true` 或面板打开
 
 ## 边界原则（重要）
 
@@ -105,7 +105,7 @@ MCP 工具（`mcp__<server>__<tool>`）始终按 server 名自动成组，不需
 - **观察区**：启动快照（含 35 秒宽限窗）之后才出现的未认领工具进隐藏的 trial 组——"未知即可见"只适用于启动时就存在的工具，迟到的按"新插件"对待；调用满 `trialPromoteAfter` 次自动转正，转正名单持久化。控制面三件套和协议工具永远不进观察区
 - **可见性当权限**：`gatedGroups` 里的组（默认 ssh/email/kimi-cu）激活时要用户确认——模型第一次 `activate` 会拿到"去问用户"的引导，用户点头后带 `confirm:true` 重试才放行；含 gated 组的模式同理。面板直接改配置，是用户本人操作，不受此闸
 - **模式切换**：`mode` 动作执行模式的 activate/hide 清单，是一次性开关操作，不动清单之外的组（上次模式开的组不会自动关）。只读审阅的隐藏清单是人工策展，新装高危插件组记得补进 review 模式
-- **读外网切断外联**：`web_fetch`/`web_search` 或浏览器、检索组的工具一返回，当轮把 `cutGroups` 里的组强制 deny（哪怕已激活）——切的是可见性不是组开关，恢复后用户状态原样。恢复有两条路：宿主发 `turn/end`（精确当轮）或 `cutLasts` 次调用后自动兜底；确需外发时模型向用户确认后用 `release` 解除，每次解除记日志。cut 期间走 `tools_call` 代理会被拒，UNKNOWN_TOOL 自愈会说明原因
+- **读外网切断外联**：`web_fetch`/`web_search` 或浏览器、检索组的工具一返回，当轮把 `cutGroups` 里的组强制 deny（哪怕已激活）——切的是可见性不是组开关，恢复后用户状态原样。恢复靠 `cutLasts` 次工具调用后自动兜底（实测生效；宿主 `turn/end` 事件插件层收不到，监听保留但不算数），切断因此可能跨轮存活；确需外发时模型向用户确认后用 `release` 解除，每次解除记日志。cut 期间走 `tools_call` 代理会被拒，UNKNOWN_TOOL 自愈会说明原因
 - **门面工具**：`browser` 常驻，把 chrome-devtools 的三十二个工具压成十二个动作（navigate/click/type/press/screenshot/snapshot/eval/tabs/switch/close/wait/scroll）。组没激活时用它兜底，组激活后仍可用（会附一句"有完整工具"的提示）。门面走 `ctx.tools.execute` 全局视图代理，和 tools_call 同一条路。门面在豁免名单里，永远不会被藏
 - 组表的 token 预算：目录只列**有工具的组**，空组不进系统提示
 - **deny 名单没变就不重跑**：掩码的 deny 集合与上一次完全相同且已生效时，`applyMask` 直接返回，不 dispose、不 restrict、不重算 token 估算。启动和热装时会对每个 agent 各跑一遍，这条省掉的是重复开销
@@ -121,6 +121,9 @@ MCP 工具（`mcp__<server>__<tool>`）始终按 server 名自动成组，不需
 - **子代理默认不隐藏**（`hideInSubagents: false`）。代价是子代理的上下文仍然是全量的（每次派子代理都吃一份完整 schema）。2026-10-27 探针实测：子代理作用域里 `loadout` / `tools_search` / `tools_call` 其实**都在**，所以"藏了就没人解套"这个原始理由不成立；保持关闭是产品选择（子代理被藏后每次都得自己先激活，行为路径变长），不是能力限制。要开就设 `hideInSubagents: true`
 - 报错自愈只在 `UNKNOWN_TOOL` 上生效，且只对**已归组且当前隐藏**的工具改写；未归组的工具本来就能调，不需要引导
 - 两个面板端点（state/config）带自守卫：自定义头 `x-dsh-loadout: 1` + Host 必须本机回环 + Origin 一致。手机经 remote-web-ui 隧道打不开面板，这是代价不是 bug
+- **会话态在内存里**：DSH 重启（装插件、升级）后，组开关、模式、租约、切断全部回默认，手动激活过的组要重新开（持久化设计见 TECH_DEBT #2）
+- **代理/门面调用不进统计**：`tools_call`/`browser` 发起的调用不计入调用频率与 `review` 排行，trial 转正也只对直接调用计数（盲视范围见 TECH_DEBT #9）
+- **安全定位**：gated 确认是模型自声明，面板三道闸只挡浏览器跨站——这套机制防手滑与低水平提示注入，不防本机进程或模型主动越权（绕过路径见 TECH_DEBT #5）
 
 ## 效果实测（2026-10-27，本机）
 
@@ -129,8 +132,8 @@ MCP 工具（`mcp__<server>__<tool>`）始终按 server 名自动成组，不需
 ## 测试
 
 ```bash
-node tests/test-grouping.mjs   # 分组/匹配/配置/模式/切断的纯逻辑，29 条
-node tests/smoke.mjs           # 假 ctx 跑 apply()：注册/掩码/租约/自愈/面板/子代理/参数校验/端点守卫/观察区/模式/切断/会话接口/门面/去重/清理/日志轮转，88 条
+node tests/test-grouping.mjs   # 分组/匹配/配置/模式/切断的纯逻辑，31 条
+node tests/smoke.mjs           # 假 ctx 跑 apply()：注册/掩码/租约/自愈/面板/子代理/参数校验/端点守卫/观察区/模式/切断/会话接口/门面/去重/清理/日志轮转/修复回归，95 条
 node tests/client-check.mjs    # 客户端那一半能否加载并注册面板
 node tests/sim.mjs             # 拿本机真实工具表对拍：哪些被藏、有没有误藏控制面
 ```
