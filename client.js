@@ -130,6 +130,8 @@ window.__ModuleLoader__.load({
       const [err, setErr] = useState('')
       const [msg, setMsg] = useState('')
       const [busy, setBusy] = useState(false)
+      // 消息条是否错误样式；靠前缀猜会漏（"保存失败"之外还有"操作失败"）
+      const [msgErr, setMsgErr] = useState(false)
       const [tab, setTab] = useState('groups')
       const [open, setOpen] = useState(null)
       const [idle, setIdle] = useState('')
@@ -243,11 +245,13 @@ window.__ModuleLoader__.load({
             mcpGroups: mcpAuto ? null : false,
           }
           const r = await saveConfig(payload)
+          setMsgErr(false)
           setMsg(r.regrouped
             ? '已保存并重新分组：新会话按新规则；当前会话的组表也已重算。'
             : '已保存。规则未变化，无需重分组。')
           await load()
         } catch (e) {
+          setMsgErr(true)
           setMsg('保存失败：' + String(e.message || e))
         } finally { setBusy(false) }
       }
@@ -263,9 +267,11 @@ window.__ModuleLoader__.load({
         try {
           await sessionAction(agentId, group, action)
           const verb = action === 'activate' ? '激活' : action === 'deactivate' ? '收回' : '解除切断'
+          setMsgErr(false)
           setMsg(`已${verb}${group ? ' ' + group : ''}（用户手动操作，已记日志）`)
           await load()
         } catch (e) {
+          setMsgErr(true)
           setMsg('操作失败：' + String(e.message || e))
         } finally { setBusy(false) }
       }
@@ -522,7 +528,7 @@ window.__ModuleLoader__.load({
           h('button', { className: 'tctl-btn', disabled: busy, onClick: () => setHiddenGroups(new Set()) }, '全部默认放行'),
           h('button', { className: 'tctl-btn', 'data-on': 'true', disabled: busy, onClick: save }, busy ? '保存中…' : '保存')
         ),
-        msg ? h('p', { className: 'tctl-msg ' + (msg.startsWith('保存失败') ? 'tctl-err' : 'tctl-ok') }, msg) : null
+        msg ? h('p', { className: 'tctl-msg ' + (msgErr ? 'tctl-err' : 'tctl-ok') }, msg) : null
       )
     }
 
